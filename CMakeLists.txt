@@ -18,16 +18,17 @@ project(minizip-ng
     DESCRIPTION "Zip manipulation library"
 	HOMEPAGE_URL https://github.com/zlib-ng/minizip-ng/)
 
-include(CMakeDependentOption)
-include(CheckLibraryExists)
-include(CheckSymbolExists)
+include(CheckCCompilerFlag)
+include(CheckCSourceCompiles)
 include(CheckFunctionExists)
 include(CheckIncludeFile)
 include(CheckIncludeFiles)
-include(CheckCSourceCompiles)
+include(CheckLibraryExists)
+include(CheckSymbolExists)
 include(CheckTypeSize)
-include(GNUInstallDirs)
+include(CMakeDependentOption)
 include(FeatureSummary)
+include(GNUInstallDirs)
 
 include(cmake/detect-sanitizer.cmake)
 
@@ -421,7 +422,7 @@ if(MZ_ZSTD)
     elseif(MZ_FETCH_LIBS)
         set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "Build zstd programs")
 
-        clone_repo(zstd https://github.com/facebook/zstd release)
+        clone_repo(zstd https://github.com/facebook/zstd release build/cmake)
 
         list(APPEND MINIZIP_INC ${ZSTD_SOURCE_DIR}/lib)
         if(NOT DEFINED BUILD_SHARED_LIBS OR NOT ${BUILD_SHARED_LIBS})

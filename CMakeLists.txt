@@ -218,7 +218,7 @@ if(MZ_ZLIB)
         set(PC_PRIVATE_DEPS "zlib")
         set(ZLIB_COMPAT ON)
     elseif(MZ_FETCH_LIBS)
-        set(ZLIB_ENABLE_TESTS OFF CACHE BOOL "Build zlib-ng tests" FORCE)
+        set(BUILD_TESTING OFF CACHE BOOL "Build zlib-ng tests" FORCE)
 
         clone_repo(zlib https://github.com/zlib-ng/zlib-ng stable)
 
@@ -357,7 +357,7 @@ endif()
 if(MZ_PPMD)
     message(STATUS "Using PPMD")
 
-    clone_repo(ppmd https://github.com/ip7z/7zip "25.01")
+    clone_repo(ppmd https://github.com/ip7z/7zip "26.00")
 
     # get the 7zip/PPMd version number
     file(READ "${PPMD_SOURCE_DIR}/C/7zVersion.h" version)

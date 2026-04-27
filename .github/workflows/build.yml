@@ -4,7 +4,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  ci:
+  build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -25,12 +25,19 @@ jobs:
             cmake-args: -D MZ_SANITIZER=Undefined
             codecov: ubuntu_gcc_undefined
 
-          - name: Ubuntu GCC MSAN
+          - name: Ubuntu Clang MSAN
             os: ubuntu-latest
-            compiler: gcc
-            cxx-compiler: g++
-            cmake-args: -D MZ_SANITIZER=Memory
-            codecov: ubuntu_gcc_msan
+            compiler: clang-20
+            cxx-compiler: clang++-20
+            # Disable OpenSSL since it is not built with MSAN
+            # Fetch third-party libraries and don't use system libraries so they can be intrumented
+            cmake-args: -GNinja -DMZ_SANITIZER=Memory -DMZ_OPENSSL=OFF -DMZ_FORCE_FETCH_LIBS=ON
+            packages: ninja-build clang-20 llvm-20 libclang-rt-20-dev
+            gcov-exec: llvm-cov-20 gcov
+            build-config: Debug
+            # https://github.com/llvm/llvm-project/issues/55785
+            msan-options: use_sigaltstack=0
+            # Coverage disabled for clang-20, errors
 
           # No code coverage on release builds
           - name: Ubuntu 22 Clang
@@ -237,6 +244,55 @@ jobs:
         choco uninstall --no-progress strawberryperl
         choco install ninja --no-progress
 
+    - name: Set LLVM_BUILD_DIR for LLVM C++ libraries (MSAN)
+      if: contains(matrix.name, 'MSAN') && startsWith(matrix.compiler, 'clang')
+      run: |
+        echo "LLVM_BUILD_DIR=`pwd`/llvm-project/build" >> $GITHUB_ENV
+
+    - name: Get latest hash change for LLVM C++ libraries (MSAN)
+      if: contains(matrix.name, 'MSAN') && startsWith(matrix.compiler, 'clang')
+      id: llvm-remote-hash
+      run: |
+        HASH=$(git ls-remote https://github.com/llvm/llvm-project refs/heads/release/20.x | cut -f1)
+        if [ -z "$HASH" ]; then
+          echo "Failed to fetch LLVM remote hash"
+          exit 1
+        fi
+        echo "value=$HASH" >> $GITHUB_OUTPUT
+
+    - name: Cache LLVM C++ libraries (MSAN)
+      if: contains(matrix.name, 'MSAN') && startsWith(matrix.compiler, 'clang')
+      id: cache-llvm
+      uses: actions/cache@v5
+      with:
+        path: |
+          ${{ env.LLVM_BUILD_DIR }}/lib
+          ${{ env.LLVM_BUILD_DIR }}/include
+        key: cache-llvm-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler }}-${{ steps.llvm-remote-hash.outputs.value }}
+
+    - name: Compile LLVM C++ libraries (MSAN)
+      if: contains(matrix.name, 'MSAN') && startsWith(matrix.compiler, 'clang') && steps.cache-llvm.outputs.cache-hit != 'true'
+      run: |
+        # Sparse-checkout only the folders we need
+        git clone --depth=1 --filter=blob:none https://github.com/llvm/llvm-project --no-checkout --branch release/20.x
+        cd llvm-project
+        git sparse-checkout set cmake runtimes libc libcxx libcxxabi llvm/cmake
+        git checkout
+        cmake -S runtimes -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+          -DLLVM_USE_SANITIZER=MemoryWithOrigins \
+          -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+          -DLIBCXX_ENABLE_STATIC=OFF \
+          -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+          -DLLVM_INCLUDE_TESTS=OFF \
+          -DLLVM_INCLUDE_DOCS=OFF
+        cmake --build build -j5 -- cxx cxxabi
+      env:
+        CFLAGS: -O2
+        CC: ${{ matrix.compiler }}
+        CXX: ${{ matrix.cxx-compiler }}
+
     - name: Generate project files
       shell: bash
       run: |
@@ -257,6 +313,8 @@ jobs:
     - name: Run test cases
       run: ctest --output-on-failure -C ${{ matrix.build-config || 'Release' }}
       working-directory: ${{ matrix.build-dir }}
+      env:
+        MSAN_OPTIONS: ${{ matrix.msan-options || 'verbosity=0' }}
 
     - name: Setup python
       uses: actions/setup-python@v6
@@ -275,21 +333,17 @@ jobs:
           --gcov-executable "${{ matrix.gcov-exec || 'gcov' }}" \
           --root . \
           --xml \
-          --output coverage.xml \
+          --output coverage-${{ matrix.codecov }}.xml \
           --verbose
 
     - name: Upload coverage report
-      uses: codecov/codecov-action@v6
-      if: always() && matrix.codecov && env.CODECOV_TOKEN != ''
+      uses: actions/upload-artifact@v6
+      if: always() && matrix.codecov
       with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        flags: ${{ matrix.codecov }}
-        name: ${{ matrix.name }}
-        directory: .
-        verbose: true
-        fail_ci_if_error: true
-      env:
-        CODECOV_TOKEN: "${{ secrets.CODECOV_TOKEN }}"
+        name: Coverage Report - ${{ matrix.name }}
+        path: coverage-${{ matrix.codecov }}.xml
+        if-no-files-found: ignore
+        retention-days: 2
 
     - name: Package release (Ubuntu/macOS)
       if: (runner.os == 'Linux' || runner.os == 'macOS') && matrix.deploy && startsWith(github.ref, 'refs/tags/')
@@ -322,3 +376,40 @@ jobs:
         overwrite: true
       env:
         GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+  coverage:
+    name: Upload Coverage Reports
+    runs-on: ubuntu-latest
+    needs: build
+    if: always() && !cancelled()
+    steps:
+      - name: Download all reports
+        uses: actions/download-artifact@v7
+        with:
+          pattern: Coverage Report - *
+          merge-multiple: true
+
+      - name: Collect coverage report paths
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(coverage-*.xml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No coverage reports found, skipping upload."
+            exit 0
+          fi
+          printf '%s\n' "${files[@]}"
+          IFS=','
+          echo "COVERAGE_REPORTS=${files[*]}" >> $GITHUB_ENV
+
+      - name: Publish coverage reports
+        uses: codecov/codecov-action@v6
+        if: env.COVERAGE_REPORTS != '' && env.CODECOV_TOKEN != ''
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ env.COVERAGE_REPORTS }}
+          name: ${{ github.workflow }}-${{ github.event_name }}
+          verbose: true
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: "${{ secrets.CODECOV_TOKEN }}"

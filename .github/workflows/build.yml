@@ -337,7 +337,7 @@ jobs:
           --verbose
 
     - name: Upload coverage report
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       if: always() && matrix.codecov
       with:
         name: Coverage Report - ${{ matrix.name }}
@@ -384,7 +384,7 @@ jobs:
     if: always() && !cancelled()
     steps:
       - name: Download all reports
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: Coverage Report - *
           merge-multiple: true

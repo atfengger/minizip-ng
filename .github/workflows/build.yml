@@ -225,7 +225,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Install packages (macOS)
       if: runner.os == 'macOS'
@@ -263,7 +263,7 @@ jobs:
     - name: Cache LLVM C++ libraries (MSAN)
       if: contains(matrix.name, 'MSAN') && startsWith(matrix.compiler, 'clang')
       id: cache-llvm
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       with:
         path: |
           ${{ env.LLVM_BUILD_DIR }}/lib
@@ -403,7 +403,7 @@ jobs:
           echo "COVERAGE_REPORTS=${files[*]}" >> $GITHUB_ENV
 
       - name: Publish coverage reports
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         if: env.COVERAGE_REPORTS != '' && env.CODECOV_TOKEN != ''
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

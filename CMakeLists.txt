@@ -494,8 +494,13 @@ if(WIN32)
     set(MZ_LIBBSD OFF)
     set(MZ_ICONV OFF)
 else()
-    list(APPEND STDLIB_DEF -D_POSIX_C_SOURCE=200809L -D_BSD_SOURCE -D_DEFAULT_SOURCE)
+    list(APPEND STDLIB_DEF -D_BSD_SOURCE -D_DEFAULT_SOURCE)
     list(APPEND MINIZIP_SRC mz_os_posix.c mz_strm_os_posix.c)
+
+    check_symbol_exists(_POSIX_C_SOURCE "features.h" HAVE_POSIX_C_SOURCE)
+    if (NOT HAVE_POSIX_C_SOURCE)
+        list(APPEND STDLIB_DEF -D_POSIX_C_SOURCE=200809L)
+    endif()
 
     if(APPLE)
         # Despite being part of POSIX 2008, macOS thinks that O_NOFOLLOW is still a non-standard extension
@@ -855,6 +860,9 @@ if(MZ_BUILD_TESTS)
     target_compile_definitions(minizip_cli PRIVATE ${STDLIB_DEF} ${MINIZIP_DEF})
     target_link_libraries(minizip_cli ${MINIZIP_TARGET})
     if(WIN32)
+        if(MINGW)
+            target_link_options(minizip_cli PRIVATE -municode)
+        endif()
         set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT minizip_cli)
     endif()
 
@@ -916,6 +924,9 @@ if(MZ_BUILD_TESTS AND MZ_BUILD_UNIT_TESTS)
             list(APPEND COMPRESS_METHOD_ARGS "-t")
         endif()
         list(LENGTH COMPRESS_METHOD_NAMES COMPRESS_METHOD_COUNT)
+        if(COMPRESS_METHOD_COUNT EQUAL 0)
+            return()
+        endif()
         math(EXPR COMPRESS_METHOD_COUNT "${COMPRESS_METHOD_COUNT}-1")
         foreach(INDEX RANGE ${COMPRESS_METHOD_COUNT})
             list(GET COMPRESS_METHOD_NAMES ${INDEX} COMPRESS_METHOD_NAME)
@@ -929,7 +940,7 @@ if(MZ_BUILD_TESTS AND MZ_BUILD_UNIT_TESTS)
             add_test(NAME ${COMPRESS_METHOD_NAME}-zip-${EXTRA_NAME}
                      COMMAND minizip_cli ${COMPRESS_METHOD_ARG} -o ${EXTRA_ARGS}
                         ${COMPRESS_METHOD_PATH}
-                        test.c test.h empty.txt random.bin uniform.bin fuzz
+                        empty.txt random.bin uniform.bin fuzz
                      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
             add_test(NAME ${COMPRESS_METHOD_NAME}-list-${EXTRA_NAME}
                      COMMAND minizip_cli -l ${EXTRA_ARGS} ${COMPRESS_METHOD_PATH}
@@ -951,7 +962,7 @@ if(MZ_BUILD_TESTS AND MZ_BUILD_UNIT_TESTS)
                             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
             endif()
             add_test(NAME ${COMPRESS_METHOD_NAME}-erase-${EXTRA_NAME}
-                    COMMAND minizip_cli -o -e ${COMPRESS_METHOD_PATH} test.c test.h
+                    COMMAND minizip_cli -o -e ${COMPRESS_METHOD_PATH} empty.txt random.bin
                     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
             if(NOT MZ_COMPRESS_ONLY)
                 add_test(NAME ${COMPRESS_METHOD_NAME}-erase-unzip-${EXTRA_NAME}

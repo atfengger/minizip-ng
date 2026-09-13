@@ -27,9 +27,7 @@ int32_t mz_path_combine(char *path, const char *join, int32_t max_path) {
     if (!path || !join || !max_path)
         return MZ_PARAM_ERROR;
 
-    path_len = (int32_t)strlen(path);
-
-    if (path_len == 0) {
+    if (*path == 0) {
         strncpy(path, join, max_path - 1);
         path[max_path - 1] = 0;
     } else {
@@ -363,7 +361,7 @@ int32_t mz_dir_has_unsafe_symlink(const char *path, const char *base_path) {
     char *symlink_target = NULL;
     size_t path_len = 0;
     size_t base_len = 0;
-    size_t max_path = 1024;
+    int32_t max_path = 1024;
     size_t pos = 0;
     size_t cmp_len = 0;
     int32_t err = MZ_OK;

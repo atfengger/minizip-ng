@@ -26,7 +26,7 @@
 
 /***************************************************************************/
 
-#if defined(MZ_ZIP_NO_CRYPTO)
+#if defined(MZ_ZIP_NO_CRYPT_BACKEND)
 int32_t mz_crypt_rand(uint8_t *buf, int32_t size) {
     return mz_os_rand(buf, size);
 }
@@ -176,6 +176,184 @@ pbkdf2_cleanup:
     mz_crypt_hmac_delete(&hmac2);
 
     return err;
+}
+#endif
+
+/***************************************************************************/
+
+#if defined(HAVE_WZAES)
+/* Counter blocks generated per cipher call, enough to keep the AES pipeline busy */
+#  define MZ_AES_CTR_BATCH (8)
+
+/* Counter mode layered over the block cipher forward function */
+typedef struct mz_crypt_aes_ctr_s {
+    void *aes;
+    int32_t counter;
+    uint32_t pos;
+    uint8_t block[MZ_AES_BLOCK_SIZE];
+    uint8_t nonce[MZ_AES_BLOCK_SIZE];
+} mz_crypt_aes_ctr;
+
+void mz_crypt_aes_ctr_reset(void *handle) {
+    mz_crypt_aes_ctr *ctr = (mz_crypt_aes_ctr *)handle;
+
+    mz_crypt_aes_reset(ctr->aes);
+
+    memset(ctr->nonce, 0, sizeof(ctr->nonce));
+    memset(ctr->block, 0, sizeof(ctr->block));
+
+    ctr->pos = MZ_AES_BLOCK_SIZE;
+}
+
+static void mz_crypt_aes_ctr_increment(mz_crypt_aes_ctr *ctr) {
+    uint32_t i = 0;
+
+    /* WinZip AES counts little endian across the low 8 bytes */
+    if (ctr->counter == MZ_AES_CTR_LE8) {
+        while (i < 8 && !++ctr->nonce[i])
+            i += 1;
+        return;
+    }
+
+    /* NIST SP 800-38A counts big endian across the whole block */
+    i = MZ_AES_BLOCK_SIZE;
+    while (i > 0 && !++ctr->nonce[i - 1])
+        i -= 1;
+}
+
+static int32_t mz_crypt_aes_ctr_keystream(mz_crypt_aes_ctr *ctr, uint8_t *block, int32_t count) {
+    int32_t size = count * MZ_AES_BLOCK_SIZE;
+    int32_t i = 0;
+
+    for (i = 0; i < count; i += 1) {
+        memcpy(block + i * MZ_AES_BLOCK_SIZE, ctr->nonce, MZ_AES_BLOCK_SIZE);
+        mz_crypt_aes_ctr_increment(ctr);
+    }
+
+    /* Encrypt the counter blocks using ECB mode to form the next xor buffer */
+    if (mz_crypt_aes_encrypt(ctr->aes, NULL, 0, block, size) != size)
+        return MZ_CRYPT_ERROR;
+
+    return MZ_OK;
+}
+
+static void mz_crypt_aes_ctr_xor(uint8_t *dst, const uint8_t *src, int32_t size) {
+    int32_t i = 0;
+
+    for (; i + (int32_t)sizeof(uint64_t) <= size; i += sizeof(uint64_t)) {
+        uint64_t a = 0;
+        uint64_t b = 0;
+
+        memcpy(&a, dst + i, sizeof(a));
+        memcpy(&b, src + i, sizeof(b));
+
+        a ^= b;
+
+        memcpy(dst + i, &a, sizeof(a));
+    }
+
+    for (; i < size; i += 1)
+        dst[i] ^= src[i];
+}
+
+int32_t mz_crypt_aes_ctr_encrypt(void *handle, uint8_t *buf, int32_t size) {
+    mz_crypt_aes_ctr *ctr = (mz_crypt_aes_ctr *)handle;
+    uint8_t keystream[MZ_AES_CTR_BATCH * MZ_AES_BLOCK_SIZE];
+    uint32_t pos = 0;
+    int32_t err = MZ_OK;
+    int32_t i = 0;
+
+    if (!ctr || !buf || size < 0)
+        return MZ_PARAM_ERROR;
+
+    pos = ctr->pos;
+
+    /* Consume whatever the previous call left of its final block */
+    for (; i < size && pos < MZ_AES_BLOCK_SIZE; i += 1, pos += 1)
+        buf[i] ^= ctr->block[pos];
+
+    while (i < size) {
+        int32_t bytes = size - i;
+        int32_t blocks = 0;
+
+        if (bytes > MZ_AES_CTR_BATCH * MZ_AES_BLOCK_SIZE)
+            bytes = MZ_AES_CTR_BATCH * MZ_AES_BLOCK_SIZE;
+
+        blocks = (bytes + MZ_AES_BLOCK_SIZE - 1) / MZ_AES_BLOCK_SIZE;
+
+        err = mz_crypt_aes_ctr_keystream(ctr, keystream, blocks);
+        if (err != MZ_OK)
+            break;
+
+        mz_crypt_aes_ctr_xor(buf + i, keystream, bytes);
+        i += bytes;
+
+        /* Save the keystream left over from the final block for the next call */
+        pos = bytes % MZ_AES_BLOCK_SIZE;
+        if (pos)
+            memcpy(ctr->block, keystream + bytes - pos, MZ_AES_BLOCK_SIZE);
+        else
+            pos = MZ_AES_BLOCK_SIZE;
+    }
+
+    ctr->pos = pos;
+    return err;
+}
+
+int32_t mz_crypt_aes_ctr_set_key(void *handle, const void *key, int32_t key_length, const void *iv, int32_t iv_length) {
+    mz_crypt_aes_ctr *ctr = (mz_crypt_aes_ctr *)handle;
+
+    if (!ctr || !key || !key_length)
+        return MZ_PARAM_ERROR;
+    if (iv && iv_length != MZ_AES_BLOCK_SIZE)
+        return MZ_PARAM_ERROR;
+
+    mz_crypt_aes_ctr_reset(handle);
+
+    if (iv)
+        memcpy(ctr->nonce, iv, MZ_AES_BLOCK_SIZE);
+
+    mz_crypt_aes_set_mode(ctr->aes, MZ_AES_MODE_ECB);
+
+    return mz_crypt_aes_set_encrypt_key(ctr->aes, key, key_length, NULL, 0);
+}
+
+void mz_crypt_aes_ctr_set_counter(void *handle, int32_t counter) {
+    mz_crypt_aes_ctr *ctr = (mz_crypt_aes_ctr *)handle;
+
+    ctr->counter = counter;
+}
+
+void *mz_crypt_aes_ctr_create(void) {
+    mz_crypt_aes_ctr *ctr = (mz_crypt_aes_ctr *)calloc(1, sizeof(mz_crypt_aes_ctr));
+
+    if (ctr) {
+        ctr->aes = mz_crypt_aes_create();
+        if (!ctr->aes) {
+            free(ctr);
+            return NULL;
+        }
+
+        ctr->counter = MZ_AES_CTR_BE;
+        ctr->pos = MZ_AES_BLOCK_SIZE;
+    }
+
+    return ctr;
+}
+
+void mz_crypt_aes_ctr_delete(void **handle) {
+    mz_crypt_aes_ctr *ctr = NULL;
+
+    if (!handle)
+        return;
+
+    ctr = (mz_crypt_aes_ctr *)*handle;
+    if (ctr) {
+        mz_crypt_aes_delete(&ctr->aes);
+        free(ctr);
+    }
+
+    *handle = NULL;
 }
 #endif
 
